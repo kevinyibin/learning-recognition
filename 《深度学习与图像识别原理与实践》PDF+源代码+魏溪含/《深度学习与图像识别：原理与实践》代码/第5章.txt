@@ -1,0 +1,216 @@
+p78-79
+import numpy as np
+def _sigmoid(in_data):
+    return 1 / (1 + np.exp(-in_data))
+#输入层
+x = np.array([0.9,0.1,0.8])
+#隐藏层：需要计算输入到中间层每个节点的组合，中间隐藏层的每个节点都与输入层的每个节点相连所以w1是一个3*3的矩阵
+#因此每个节点都得到输入信号的部分信息。
+#第一个输入节点和中间隐藏层第一个节点之间的权重为w11=0.9,输入的第二个节点和隐藏层的第二节点之间的链接的权重为w22 = 0.8
+w1 = np.array([[0.9,0.3,0.4],
+               [0.2,0.8,0.2],
+             [0.1,0.5,0.6]])
+#因为输出层有3个节点，所以w2也是一个3*3的矩阵
+w2 = np.array([
+    [0.3,0.7,0.5],
+    [0.6,0.5,0.2],
+    [0.8,0.1,0.9]
+])
+
+Xhidden = _sigmoid(w1.dot(x))
+print(Xhidden)
+Xoutput = w2.dot(Xhidden)
+print(Xoutput) #最终输出的结果
+
+
+p79-80
+import numpy as np
+def _sigmoid(in_data):
+    return 1 / (1 + np.exp(-in_data))
+def init_network():
+    network={}
+    network['W1']=np.array([[0.1,0.3,0.5],[0.2,0.4,0.6]])
+    network['b1']=np.array([0.1,0.2,0.3])
+    network['W2']=np.array([[0.1,0.4],[0.2,0.5],[0.3,0.6]])
+    network['b2']=np.array([0.1,0.2])
+    network['W3']=np.array([[0.1,0.3],[0.2,0.4]])
+    network['b3']=np.array([0.1,0.2])
+    return network
+
+def forward(network,x):
+    w1,w2,w3 = network['W1'],network['W2'],network['W3']
+    b1,b2,b3 = network['b1'],network['b2'],network['b3']
+    a1 = x.dot(w1) + b1
+    z1 = _sigmoid(a1)
+    a2 = z1.dot(w2) + b2
+    z2 = _sigmoid(a2)
+    a3 = z2.dot(w3) + b3
+    y = a3
+    return y
+
+network = init_network()
+x = np.array([1.0,0.5])
+y = forward(network,x)
+print(y)
+
+
+p91-92
+accuracy_cnt = 0
+batch_size = 100
+x = test_dataset.test_data.numpy().reshape(-1,28*28)
+labels = test_dataset.test_labels
+finallabels = labels.reshape(labels.shape[0],1)
+bestloss = float('inf')
+for i in range(0,int(len(x)),batch_size):
+    network = init_network()
+    x_batch = x[i:i+batch_size]
+    y_batch = forward(network, x_batch)
+    one_hot_labels = torch.zeros(batch_size, 10).scatter_(1, finallabels[i:i+batch_size], 1)
+    loss = cross_entropy_error(one_hot_labels.numpy(),y_batch)
+    if loss < bestloss:
+        bestloss = loss
+        bestw1,bestw2,bestw3 = network['W1'],network['W2'],network['W3']
+    print("best loss: is %f "  %(bestloss))
+
+
+p97
+def numerical_gradient(f, x):
+    h = 1e-4 # 0.0001
+    grad = np.zeros_like(x)
+    
+    it = np.nditer(x, flags=['multi_index'], op_flags=['readwrite'])
+    while not it.finished:
+        idx = it.multi_index
+        tmp_val = x[idx]
+        x[idx] = float(tmp_val) + h
+        fxh1 = f(x) # f(x+h)
+        
+        x[idx] = tmp_val - h 
+        fxh2 = f(x) # f(x-h)
+        grad[idx] = (fxh1 - fxh2) / (2*h)
+        
+        x[idx] = tmp_val # 还原值
+        it.iternext()   
+        
+    return grad
+def gradient_descent(f,init_x,lr=0.01,step_num=1000):
+    x =init_x
+    for i in range(step_num):
+        grad = numerical_gradient(f,x)
+        x -= lr*grad
+    return x
+f =  lambda w: net.loss(x,y)
+dw = gradient_descent(f,net.W) #主要需要更新的是W
+print(dw)
+
+
+p98-99
+def numerical_gradient(f, x):
+    h = 1e-4 # 0.0001
+    grad = np.zeros_like(x)
+    
+    it = np.nditer(x, flags=['multi_index'], op_flags=['readwrite'])
+    while not it.finished:
+        idx = it.multi_index
+        tmp_val = x[idx]
+        x[idx] = float(tmp_val) + h
+        fxh1 = f(x) # f(x+h)
+        
+        x[idx] = tmp_val - h 
+        fxh2 = f(x) # f(x-h)
+        grad[idx] = (fxh1 - fxh2) / (2*h)
+        
+        x[idx] = tmp_val # 还原值
+        it.iternext()   
+        
+    return grad
+
+
+p101
+#超参数
+iters_num = 1000  # 适当设定循环的次数
+train_size = x_train.shape[0]
+batch_size = 100
+learning_rate = 0.001
+
+network = TwoLayerNet(input_size = 784,hidden_size=50,output_size=10)
+for i in range(iters_num):
+    batch_mask = np.random.choice(train_size,batch_size)
+    x_batch = x_train[batch_mask]
+    y_batch = y_train[batch_mask]
+    
+    grad = network.numerical_gradient(x_batch,y_batch)
+    
+    for key in ('W1','b1','W2','b2'):
+        network.params[key] -= learning_rate*grad[key]
+
+#记录学习过程
+    loss = network.loss(x_batch,y_batch)
+    if i % 100 == 0:
+        print(loss)
+
+
+p102-103
+train_size = x_train.shape[0]
+iters_num = 600
+learning_rate = 0.001
+epoch = 5
+batch_size = 100
+
+network = TwoLayerNet(input_size = 784,hidden_size=50,output_size=10)
+
+for i in range(epoch): 
+    print('current epoch is :', i)
+    for num in range(iters_num):
+        batch_mask = np.random.choice(train_size,batch_size)
+        x_batch = x_train[batch_mask]
+        y_batch = y_train[batch_mask]
+
+        grad = network.numerical_gradient(x_batch,y_batch)
+    
+        for key in ('W1','b1','W2','b2'):
+            network.params[key] -= learning_rate*grad[key]
+
+
+        loss = network.loss(x_batch,y_batch)
+        if num % 100 == 0:
+            print(loss)
+print(network.accuracy(x_test,y_test))
+
+
+p103-104
+('current epoch is :', 0)
+12.749449349344754
+1.321577706436449
+2.4804280392909557
+0.691451612120975
+0.7644400653621658
+0.8910328349199772
+('current epoch is :', 1)
+0.8793225139845198
+0.5406429175201484
+0.8747243449920528
+1.214020823308522
+0.48728660680810504
+0.5577193622438239
+('current epoch is :', 2)
+0.32463475714288875
+0.6505420260993182
+0.32280894569470653
+0.4885205422074785
+0.7975956474074802
+0.7105484843503084
+('current epoch is :', 3)
+0.18508314761722694
+0.4604569413264499
+0.630673497782514
+0.484095564925412
+0.32254112075495167
+0.7981297562129817
+('current epoch is :', 4)
+0.5218448922347282
+0.25448772007683046
+0.17326277911392846
+0.16531914875080655
+0.3239636872223559
+0.2515810758723941

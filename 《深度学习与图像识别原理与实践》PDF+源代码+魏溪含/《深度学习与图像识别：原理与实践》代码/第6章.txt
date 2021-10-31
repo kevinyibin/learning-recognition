@@ -1,0 +1,206 @@
+p110-111
+from collections import OrderedDict
+class TwoLayerNet:
+
+    def __init__(self, input_size, hidden_size, output_size, weight_init_std = 0.01):
+        # 初始化权重
+        self.params = {}
+        self.params['W1'] = weight_init_std * np.random.randn(input_size, hidden_size)
+        self.params['b1'] = np.zeros(hidden_size)
+        self.params['W2'] = weight_init_std * np.random.randn(hidden_size, output_size) 
+        self.params['b2'] = np.zeros(output_size)
+
+        # 生成层
+        self.layers = OrderedDict()
+        self.layers['Affine1'] = Affine(self.params['W1'], self.params['b1'])
+        self.layers['Relu1'] = Relu()
+        self.layers['Affine2'] = Affine(self.params['W2'], self.params['b2'])
+        self.layers['Relu2'] = Relu()
+        self.lastLayer = SoftmaxWithLoss()
+        
+    def predict(self, x):
+        for layer in self.layers.values():
+            x = layer.forward(x)
+        
+        return x
+        
+    # x:输入数据, y:监督数据
+    def loss(self, x, y):
+        p = self.predict(x)
+        return self.lastLayer.forward(p, y)
+    
+    def accuracy(self, x, y):
+        p = self.predict(x)
+        p = np.argmax(y, axis=1)
+        if y.ndim != 1 : y = np.argmax(y, axis=1)
+        
+        accuracy = np.sum(p == y) / float(x.shape[0])
+        return accuracy
+        
+    # x:输入数据, y:监督数据
+    def numerical_gradient(self, x, y):
+        loss_W = lambda W: self.loss(x, y)
+        
+        grads = {}
+        grads['W1'] = numerical_gradient(loss_W, self.params['W1'])
+        grads['b1'] = numerical_gradient(loss_W, self.params['b1'])
+        grads['W2'] = numerical_gradient(loss_W, self.params['W2'])
+        grads['b2'] = numerical_gradient(loss_W, self.params['b2'])
+        
+        return grads
+        
+    def gradient(self, x, y):
+        # forward
+        self.loss(x, y)
+
+        # backward
+        dout = 1
+        dout = self.lastLayer.backward(dout)
+        
+        layers = list(self.layers.values())
+        layers.reverse()
+        for layer in layers:
+            dout = layer.backward(dout)
+
+        # 设定
+        grads = {}
+        grads['W1'], grads['b1'] = self.layers['Affine1'].dW, self.layers['Affine1'].db
+        grads['W2'], grads['b2'] = self.layers['Affine2'].dW, self.layers['Affine2'].db
+
+        return grads
+network = TwoLayerNet(input_size=784,hidden_size=50,output_size=10)
+x_batch = x_train[:100]
+y_batch = y_train[:100]
+grad_numerical = network.numerical_gradient(x_batch,y_batch)
+grad_backprop = network.gradient(x_batch,y_batch)
+
+for key in grad_numerical.keys():
+    diff = np.average( np.abs(grad_backprop[key] - grad_numerical[key]) )
+    print(key + ":" + str(diff))
+
+
+p112-113
+from collections import OrderedDict
+class TwoLayerNet:
+
+    def __init__(self, input_size, hidden_size, output_size, weight_init_std = 0.01):
+        # 初始化权重
+        self.params = {}
+        self.params['W1'] = weight_init_std * np.random.randn(input_size, hidden_size)
+        self.params['b1'] = np.zeros(hidden_size)
+        self.params['W2'] = weight_init_std * np.random.randn(hidden_size, output_size) 
+        self.params['b2'] = np.zeros(output_size)
+
+        # 生成层
+        self.layers = OrderedDict()
+        self.layers['Affine1'] = Affine(self.params['W1'], self.params['b1'])
+        self.layers['Relu1'] = Relu()
+        self.layers['Affine2'] = Affine(self.params['W2'], self.params['b2'])
+        self.layers['Relu2'] = Relu()
+        self.lastLayer = SoftmaxWithLoss()
+        
+    def predict(self, x):
+        for layer in self.layers.values():
+            x = layer.forward(x)
+        
+        return x
+        
+    # x:输入数据, y:监督数据
+    def loss(self, x, y):
+        p = self.predict(x)
+        return self.lastLayer.forward(p, y)
+    
+    def accuracy(self, x, y):
+        p = self.predict(x)
+        p = np.argmax(p, axis=1)
+        y = np.argmax(y, axis=1)
+        
+        accuracy = np.sum(y == p) / float(x.shape[0])
+        return accuracy
+        
+    def gradient(self, x, y):
+        # forward
+        self.loss(x, y)
+
+        # backward
+        dout = 1
+        dout = self.lastLayer.backward(dout)
+        
+        layers = list(self.layers.values())
+        layers.reverse()
+        for layer in layers:
+            dout = layer.backward(dout)
+
+        # 设定
+        grads = {}
+        grads['W1'], grads['b1'] = self.layers['Affine1'].dW, self.layers['Affine1'].db
+        grads['W2'], grads['b2'] = self.layers['Affine2'].dW, self.layers['Affine2'].db
+
+        return grads
+
+
+p113
+train_size = x_train.shape[0]
+iters_num = 600
+learning_rate = 0.001
+epoch = 5
+batch_size = 100
+
+network = TwoLayerNet(input_size = 784,hidden_size=50,output_size=10)
+for i in range(epoch): 
+    print('current epoch is :', i)
+    for num in range(iters_num):
+        batch_mask = np.random.choice(train_size,batch_size)
+        x_batch = x_train[batch_mask]
+        y_batch = y_train[batch_mask]
+
+        grad = network.gradient(x_batch,y_batch)
+    
+        for key in ('W1','b1','W2','b2'):
+            network.params[key] -= learning_rate*grad[key]
+
+
+        loss = network.loss(x_batch,y_batch)
+        if num % 100 == 0:
+            print(loss)
+            
+print('准确率： ',network.accuracy(x_test,y_test) * 100,'%')
+
+
+p113-114
+current epoch is : 0
+2.2753798478814895
+0.6610914122397926
+0.3003014145366447
+0.25776192989088054
+0.17468173033680465
+0.12297262305993698
+current epoch is : 1
+0.14476994572636273
+0.16806233003386506
+0.10899282838635063
+0.1398080642943528
+0.0631957790462195
+0.14957822424574135
+current epoch is : 2
+0.1290895688384963
+0.09535212679963873
+0.18500797494490775
+0.057708589923198696
+0.05688971712292652
+0.0868967341522295
+current epoch is : 3
+0.06375133753928874
+0.11429593125907099
+0.11290842006721384
+0.04896661977912546
+0.20236172555026669
+0.06978181342959813
+current epoch is : 4
+0.05107801847346741
+0.07954869456879843
+0.04250498953199182
+0.06376040515564727
+0.025734163371306584
+0.035472113296809826
+准确率：  96.49 %

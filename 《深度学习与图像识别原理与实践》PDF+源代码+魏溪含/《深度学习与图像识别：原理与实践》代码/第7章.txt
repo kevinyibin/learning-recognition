@@ -1,0 +1,196 @@
+p119
+import torch
+from torch.autograd import Variable
+import matplotlib.pyplot as plt
+
+tensor = torch.linspace(-6,6,200)
+tensor = Variable(tensor)
+np_data = tensor.numpy()
+
+#定义激活函数
+y_relu = torch.relu(tensor).data.numpy()
+y_sigmoid =torch.sigmoid(tensor).data.numpy()
+y_tanh = torch.tanh(tensor).data.numpy()
+
+plt.figure(1, figsize=(8, 6))
+plt.subplot(221)
+plt.plot(np_data, y_relu, c='red', label='relu')
+plt.legend(loc='best')
+
+plt.subplot(222)
+plt.plot(np_data, y_sigmoid, c='red', label='sigmoid')
+plt.legend(loc='best')
+
+plt.subplot(223)
+plt.plot(np_data, y_tanh, c='red', label='tanh')
+plt.legend(loc='best')
+
+plt.show()
+
+
+p121-122
+import torch
+from torch import nn
+import numpy as np
+# 编码one_hot
+def one_hot(y):
+    '''
+    y: (N)的一维tensor，值为每个样本的类别
+    out: 
+        y_onehot: 转换为one_hot 编码格式 
+    '''
+    y = y.view(-1, 1)
+    y_onehot = torch.FloatTensor(3, 5)
+    
+    # In your for loop
+    y_onehot.zero_()
+    y_onehot.scatter_(1, y, 1)
+    return y_onehot
+
+
+def cross_entropy_one_hot(target):
+    # 解码 
+    _, labels = target.max(dim=1)
+    return labels
+    # 如果需要调用cross_entropy，则还需要传入一个input_
+    #return F.cross_entropy(input_, labels)
+
+x = np.array([1,2,3])
+x_tensor =torch.from_numpy(x)
+print(one_hot(x_tensor))
+x2 = np.array([[0,1,0,0,0]])
+x2_tensor = torch.from_numpy(x2)
+print(cross_entropy_one_hot(x2_tensor))
+
+
+p122-123
+import torch
+from torch.utils.data import DataLoader
+import torchvision.datasets as dsets
+import torchvision.transforms as transforms
+batch_size = 100
+# MNIST dataset
+train_dataset = dsets.MNIST(root = '/pymnist', #选择数据的根目录
+                           train = True, # 选择训练集
+                           transform = transforms.ToTensor(), #转换成tensor变量
+                           download = True) # 从网络上download图片
+test_dataset = dsets.MNIST(root = '/pymnist', #选择数据的根目录
+                           train = False, # 选择测试集
+                           transform = transforms.ToTensor(), #转换成tensor变量
+                           download = True) # 从网络上download图片
+#加载数据
+train_loader = torch.utils.data.DataLoader(dataset = train_dataset, 
+                                           batch_size = batch_size, #使用批次数据
+                                           shuffle = True)  # 将数据打乱
+test_loader = torch.utils.data.DataLoader(dataset = test_dataset,
+                                          batch_size = batch_size,
+                                          shuffle = True)
+
+
+p123-124
+import torch.nn as nn
+import torch
+
+input_size = 784 #mnist的像素为28*28
+hidden_size = 500
+num_classes = 10 #输出为10个类别分别对应0-9
+
+# 创建神经网络模型
+class Neural_net(nn.Module):
+#初始化函数，接受自定义输入特征的维数，隐含层特征维数以及输出层特征维数。
+    def __init__(self, input_num,hidden_size, out_put):
+        super(Neural_net, self).__init__()
+        self.layer1 = nn.Linear(input_num, hidden_size)#从输入到隐藏层的线性处理
+        self.layer2 = nn.Linear(hidden_size, out_put)#从隐层到输出层的线性处理
+
+    def forward(self, x):
+        out = self.layer1(x) #输入层到隐藏层的线性计算
+        out = torch.relu(out) #隐藏层激活
+        out = self.layer2(out) #输出层，注意，输出层直接接loss
+        return out
+
+net = Neural_net(input_size, hidden_size, num_classes)
+print(net)
+
+
+p124-125
+# optimization
+from torch.autograd import Variable
+import numpy as np
+learning_rate = 1e-1 #学习率
+num_epoches = 5
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.SGD(net.parameters(), lr = learning_rate)#使用随机梯度下降
+for epoch in range(num_epoches):
+    print('current epoch = %d' % epoch)
+    for i, (images, labels) in enumerate(train_loader): #利用enumerate取出一个可迭代对象的内容
+        images = Variable(images.view(-1, 28 * 28))
+        labels = Variable(labels)
+       
+        outputs = net(images) #将数据集传入网络做前向计算
+        loss = criterion(outputs, labels) #计算loss
+        optimizer.zero_grad() #在做反向传播之前先清除下网络状态
+        loss.backward() #loss反向传播
+        optimizer.step() #更新参数
+        
+        if i % 100 == 0:
+            print('current loss = %.5f' % loss.item())
+            
+print('finished training')
+
+
+p125-126
+import torch
+from torch.utils.data import DataLoader
+import torchvision.datasets as dsets
+import torchvision.transforms as transforms
+batch_size = 100
+
+# MNIST dataset
+train_dataset = dsets.CIFAR10(root = '/ml/pycifar', #选择数据的根目录
+                           train = True, # 选择训练集
+                           transform = transforms.ToTensor(), #转换成tensor变量
+                           download = True) # 从网络上download图片
+test_dataset = dsets.CIFAR10(root = '/ml/pycifar', #选择数据的根目录
+                           train = False, # 选择测试集
+                           transform = transforms.ToTensor(), #转换成tensor变量
+                           download = True) # 从网络上download图片
+#加载数据
+
+train_loader = torch.utils.data.DataLoader(dataset = train_dataset, 
+                                           batch_size = batch_size, 
+                                           shuffle = True)  # 将数据打乱
+test_loader = torch.utils.data.DataLoader(dataset = test_dataset,
+                                          batch_size = batch_size,
+                                          shuffle = True)
+
+
+p126-127
+from torch.autograd import Variable
+import torch.nn as nn
+import torch
+input_size = 3072
+hidden_size = 500
+hidden_size2 = 200
+num_classes = 10
+num_epochs = 5
+batch_size = 100
+learning_rate = 0.001
+
+
+#定义两层神经网络
+class Net(nn.Module):
+    def __init__(self,input_size,hidden_size,hidden_size2,num_classes):
+        super(Net,self).__init__()
+        self.layer1 = nn.Linear(input_size,hidden_size)
+        self.layer2 = nn.Linear(hidden_size,hidden_size2)
+        self.layer3 = nn.Linear(hidden_size2,num_classes)
+    
+    def forward(self,x):
+        out = torch.relu(self.layer1(x))
+        out = torch.relu(self.layer2(out))
+        out = self.layer3(out)
+        return out
+
+net = Net(input_size,hidden_size,hidden_size2,num_classes)
+print(net)

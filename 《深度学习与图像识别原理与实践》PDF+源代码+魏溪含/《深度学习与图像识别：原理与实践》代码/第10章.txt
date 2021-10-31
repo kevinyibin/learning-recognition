@@ -1,0 +1,581 @@
+p197-203
+import cv2
+import argparse
+import os, sys, shutil
+import numpy as np
+import pandas as pd
+import time
+import glob
+from collections import defaultdict
+from tqdm import tqdm
+
+from dataset import UNetDataset
+
+import torch
+import torchvision
+from torch.nn import DataParallel, CrossEntropyLoss
+from torch.backends import cudnn
+from torch.utils.data import DataLoader
+from torch.autograd import Variable
+
+import cfgs.config as cfg
+from unet import UNet
+
+def mkdir(path, max_depth=3):
+    parent, child = os.path.split(path)
+    if not os.path.exists(parent) and max_depth > 1:
+        mkdir(parent, max_depth-1)
+    if not os.path.exists(path):
+        os.mkdir(path)
+
+class Logger(object):
+    def __init__(self,logfile):
+        self.terminal = sys.stdout
+        self.log = open(logfile, "a")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        #this flush method is needed for python 3 compatibility.
+        #this handles the flush command by doing nothing.
+        #you might want to specify some extra behavior here.
+        pass
+
+
+class UNetTrainer(object):
+    """UNet trainer"""
+    def __init__(self, start_epoch=0, save_dir='', resume="", devices_num=2,
+                 num_classes=2, color_dim=1):
+
+        self.net = UNet(color_dim=color_dim, num_classes=num_classes)
+        self.start_epoch = start_epoch if start_epoch != 0 else 1
+        self.save_dir = os.path.join('../models', save_dir)
+        self.loss = CrossEntropyLoss()
+        self.num_classes = num_classes
+
+        if resume:
+            checkpoint = torch.load(resume)
+            if self.start_epoch == 0:
+                self.start_epoch = checkpoint['epoch'] + 1
+            if not self.save_dir:
+                self.save_dir = checkpoint['save_dir']
+            self.net.load_state_dict(checkpoint['state_dir'])
+
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+
+        self.net.cuda()
+        self.loss.cuda()
+        if devices_num == 2:
+            self.net = DataParallel(self.net, device_ids=[0, 1])
+        #self.loss = DataParallel(self.loss, device_ids=[0, 1])
+
+    def train(self, train_loader, val_loader, lr=0.001,
+              weight_decay=1e-4,
+              epochs=200,
+              save_freq=10):
+
+        self.logfile = os.path.join(self.save_dir, 'log')
+        sys.stdout = Logger(self.logfile)
+        self.epochs = epochs
+        self.lr = lr
+
+        optimizer = torch.optim.Adam(
+            self.net.parameters(),
+            #lr,
+            #momentum=0.9,
+            weight_decay = weight_decay)
+
+        for epoch in range(self.start_epoch, epochs+1):
+            self.train_(train_loader, epoch, optimizer, save_freq)
+            self.validate_(val_loader, epoch)
+
+    def train_(self, data_loader, epoch, optimizer, save_freq=10):
+        start_time = time.time()
+
+        self.net.train()
+        #lr = self.get_lr(epoch)
+
+        #for param_group in optimizer.param_groups:
+        #    param_group['lr'] = lr
+
+        metrics = []
+
+        for i, (data, target) in enumerate(tqdm(data_loader)):
+            data_t, target_t = data, target
+            data = Variable(data.cuda(async=True))
+            target = Variable(target.cuda(async=True))
+
+            output = self.net(data) #unet输出结果
+
+            output = output.transpose(1, 3).transpose(1, 2).contiguous().view(-1, self.num_classes)
+            target = target.view(-1)
+            loss_output = self.loss(output, target)
+
+            optimizer.zero_grad()
+            loss_output.backward() #反向传播loss
+            optimizer.step()
+
+            loss_output = loss_output.data[0] #loss数值
+            acc = accuracy(output, target)
+            metrics.append([loss_output, acc])
+
+            if i == 0:
+                batch_size = data.size(0)
+                _, output = output.data.max(dim=1)
+                output = output.view(batch_size, 1, 1, 320, 480).cpu() #预测结果图
+                data_t = data_t[0, 0].unsqueeze(0).unsqueeze(0) #原img图
+                target_t = target_t[0].unsqueeze(0) #gt图
+                t = torch.cat([output[0].float(), data_t, target_t.float()], 0) #第一个参数为list，拼接3张图像
+                #show_list = []
+                #for j in range(10):
+                #    show_list.append(data_t[j, 0].unsqueeze(0).unsqueeze(0))
+                #    show_list.append(target_t[j].unsqueeze(0))
+                #    show_list.append(output[j].float())
+                #    
+                #t = torch.cat(show_list, 0)
+                torchvision.utils.save_image(t,"temp_image/%02d_train.jpg"%epoch, nrow=3)
+
+            #if i == 20:
+            #    break
+
+        if epoch % save_freq == 0:
+            if 'module' in dir(self.net):
+                state_dict = self.net.module.state_dict()
+            else:
+                state_dict = self.net.state_dict()
+
+            for key in state_dict.keys():
+                state_dict[key] = state_dict[key].cpu()
+
+            torch.save({
+                'epoch' : epoch,
+                'save_dir' : self.save_dir,
+                'state_dir' : state_dict},
+
+                os.path.join(self.save_dir, '%03d.ckpt' % epoch))
+
+        end_time = time.time()
+
+        metrics = np.asarray(metrics, np.float32)
+        self.print_metrics(metrics, 'Train', end_time-start_time, epoch)
+
+    def validate_(self, data_loader, epoch):
+        start_time = time.time()
+
+        self.net.eval()
+        metrics = []
+        for i, (data, target) in enumerate(data_loader):
+            data_t, target_t = data, target
+            data = Variable(data.cuda(async=True), volatile = True)
+            target = Variable(target.cuda(async=True), volatile = True)
+
+            output = self.net(data)
+            output = output.transpose(1, 3).transpose(1, 2).contiguous().view(-1, self.num_classes)
+            target = target.view(-1)
+            loss_output = self.loss(output, target)
+
+            loss_output = loss_output.data[0]
+            acc = accuracy(output, target)
+            metrics.append([loss_output, acc])
+
+            if i == 0:
+                batch_size = data.size(0)
+                _, output = output.data.max(dim=1)
+                output = output.view(batch_size, 1, 1, 320, 480).cpu()
+                data_t = data_t[0, 0].unsqueeze(0).unsqueeze(0)
+                target_t = target_t[0].unsqueeze(0)
+                t = torch.cat([output[0].float(), data_t, target_t.float()], 0)
+            #    show_list = []
+            #    for j in range(10):
+            #        show_list.append(data_t[j, 0].unsqueeze(0).unsqueeze(0))
+            #        show_list.append(target_t[j].unsqueeze(0))
+            #        show_list.append(output[j].float())
+            #
+            #    t = torch.cat(show_list, 0)
+                torchvision.utils.save_image(t,"temp_image/%02d_val.jpg"%epoch, nrow=3)
+            #if i == 10:
+            #    break
+
+        end_time = time.time()
+
+        metrics = np.asarray(metrics, np.float32)
+        self.print_metrics(metrics, 'Validation', end_time-start_time)
+
+
+    def print_metrics(self, metrics, phase, time, epoch=-1):
+        """metrics: [loss, acc]
+        """
+        if epoch != -1:
+            print "Epoch: {}".format(epoch),
+        print phase,
+        print('loss %2.4f, accuracy %2.4f, time %2.2f' % (np.mean(metrics[:, 0]), np.mean(metrics[:, 1]), time))
+        if phase != 'Train':
+            print
+
+    def get_lr(self, epoch):
+        if epoch <= self.epochs * 0.5:
+            lr = self.lr
+        elif epoch <= self.epochs * 0.8:
+            lr = 0.1 * self.lr
+        else:
+            lr = 0.01 * self.lr
+        return lr
+
+    def save_py_files(self, path):
+        """copy .py files in exps dir, cfgs dir and current dir into
+           save_dir, and keep the files structure
+        """
+        #exps dir
+        pyfiles = [f for f in os.listdir(path) if f.endswith('.py')]
+        path = "/".join(path.split('/')[-2:])
+        exp_save_path = os.path.join(self.save_dir, path)
+        mkdir(exp_save_path)
+        for f in pyfiles:
+            shutil.copy(os.path.join(path, f),os.path.join(exp_save_path,f))
+        #current dir
+        pyfiles = [f for f in os.listdir('./') if f.endswith('.py')]
+        for f in pyfiles:
+            shutil.copy(f,os.path.join(self.save_dir,f))
+        #cfgs dir
+        shutil.copytree('./cfgs', os.path.join(self.save_dir,'cfgs'))
+
+def accuracy(output, target):
+    _, pred = output.max(dim=1)
+    correct = pred.eq(target)
+    return correct.float().sum().data[0] / target.size(0)
+
+class UNetTester(object):
+    def __init__(self, model, devices_num=2, color_dim=1, num_classes=2):
+        self.net = UNet(color_dim=color_dim, num_classes=num_classes)
+        checkpoint = torch.load(model)
+        self.color_dim = color_dim
+        self.num_classes = num_classes
+        self.net.load_state_dict(checkpoint['state_dir'])
+        self.net = self.net.cuda()
+        if devices_num == 2:
+            self.net = DataParallel(self.net, device_ids=[0, 1])
+        self.net.eval()
+
+    def test(self, folder, target_dir):
+        mkdir(target_dir)
+        cracks_files = glob.glob(os.path.join(folder, "*.jpg"))
+        print len(cracks_files), "imgs."
+        for crack_file in tqdm(cracks_files):
+            name = os.path.basename(crack_file)
+            save_path = os.path.join(target_dir, name)
+
+            data = cv2.imread(crack_file, cv2.IMREAD_GRAYSCALE)
+            output = self._test(data) #图片结果
+
+            cv2.imwrite(save_path, output)
+
+    def _test(self, data):
+        data = data.astype(np.float32) / 255.
+        data = np.expand_dims(data, 0)
+        data = np.expand_dims(data, 0)
+
+        input = torch.from_numpy(data)
+        height = input.size()[-2]
+        width= input.size()[-1]
+        input = Variable(input, volatile=True).cuda()
+        batch_size = 1
+
+        output = self.net(input)
+        output = output.transpose(1, 3).transpose(1, 2).contiguous().view(-1, self.num_classes)
+        _, output = output.data.max(dim=1)
+        output[output>0] = 255
+        output = output.view(height, width)
+        output = output.cpu().numpy()
+
+        return output
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='crack segment')
+    parser.add_argument('--train', '-t', help='train data dir', default='')
+    parser.add_argument('--resume', '-r', help='the resume model path', default='')
+    parser.add_argument('--wd', help='weight decay', type=float, default=1e-4)
+    parser.add_argument('--name', help='the name of the model', default='crack_segment')
+    parser.add_argument('--sfreq', metavar='SF', default=10, help='model save frequency',
+                        type=int)
+    parser.add_argument('--test', help='test data dir', default='')
+    parser.add_argument('--model', help='crack segment model path', default='')
+    parser.add_argument('--target', help='target data dir', default='')
+    args = parser.parse_args()
+    if args.train:
+        masks = glob.glob(os.path.join(args.train, 'mask/*.jpg'))
+        masks.sort()
+        N = len(masks)
+        train_N = int(N * 0.8)
+        train_loader = DataLoader(UNetDataset(mask_list=masks[:train_N], phase='train'),
+                                batch_size=8, shuffle=True,
+                                num_workers=32, pin_memory=True)
+        val_loader = DataLoader(UNetDataset(mask_list=masks[train_N:], phase='val'),
+                                batch_size=8, shuffle=True,
+                                num_workers=32, pin_memory=True)
+        crack_segmentor = UNetTrainer(save_dir=args.name, resume=args.resume,
+                                     devices_num=cfg.devices_num)
+        crack_segmentor.train(train_loader, val_loader, weight_decay=args.wd)
+    if args.test:
+        assert args.target, "target path must not be None."
+        assert args.target, "model path must not be None."
+        crack_segmentor = UNetTester(args.model, devices_num=cfg.devices_num)
+        crack_segmentor.test(args.test, args.target)
+
+
+p204-206
+import torch
+import torch.nn as nn
+
+def filter_for_depth(d):
+    return 4*2**d
+
+def conv2x2(in_planes, out_planes, kernel_size=3, stride=1, padding=1): #卷积层
+    return nn.Sequential(nn.Conv2d(in_planes, out_planes, kernel_size, stride, padding, bias=False),
+            nn.BatchNorm2d(out_planes),
+            nn.ReLU(inplace=True))
+
+def upconv2x2(in_planes, out_planes, kernel_size=2, stride=2, padding=0): #反卷积层
+    # Hout = (Hin-1)*stride[0] - 2*padding[0] + kernel_size[0] + output_padding[0]
+    # Wout = (Win-1)*stride[1] - 2*padding[1] + kernel_size[1] + output_padding[1]
+
+    return nn.Sequential(nn.ConvTranspose2d(in_planes, out_planes, kernel_size, stride, padding, bias=False),
+                        nn.BatchNorm2d(out_planes),
+                             nn.ReLU(inplace=True))
+
+def pre_block(color_dim):
+    """conv->conv"""
+    in_filter = color_dim
+    out_filter = filter_for_depth(0)
+
+    layers = []
+    layers.append(conv2x2(in_filter, out_filter))
+    layers.append(conv2x2(out_filter, out_filter))
+
+    return nn.Sequential(*layers)
+
+def contraction(depth):
+    """downsample->conv->conv"""
+    assert depth > 0, 'depth <= 0 '
+
+    in_filter = filter_for_depth(depth-1)
+    out_filter = filter_for_depth(depth)
+
+    layers = []
+    layers.append(nn.MaxPool2d(2, stride=2))
+    layers.append(conv2x2(in_filter, out_filter))
+    layers.append(conv2x2(out_filter, out_filter))
+
+    return nn.Sequential(*layers)
+
+def upsample(depth):
+    in_filter = filter_for_depth(depth)
+    out_filter = filter_for_depth(depth-1)
+
+    return nn.Sequential(upconv2x2(in_filter, out_filter))
+
+def expansion(depth):
+    """conv->conv->upsample"""
+
+    assert depth > 0, 'depth <=0 '
+
+    in_filter = filter_for_depth(depth+1)
+    mid_filter = filter_for_depth(depth)
+    out_filter = filter_for_depth(depth-1)
+
+    layers = []
+    layers.append(conv2x2(in_filter, mid_filter))
+    layers.append(conv2x2(mid_filter, mid_filter))
+    layers.append(upconv2x2(mid_filter, out_filter))
+
+    return nn.Sequential(*layers)
+
+def post_block(num_classes):
+    """conv->conv->up"""
+    in_filter = filter_for_depth(1)
+    mid_filter = filter_for_depth(0)
+
+    layers = []
+    layers.append(conv2x2(in_filter, mid_filter))
+    layers.append(conv2x2(mid_filter, mid_filter))
+    layers.append(nn.Conv2d(mid_filter, num_classes, kernel_size=1))
+    return nn.Sequential(*layers)
+
+class UNet(nn.Module):
+    def __init__(self, color_dim=3, num_classes=2):
+        super(UNet, self).__init__()
+
+        self.input = pre_block(color_dim)
+        self.con1 = contraction(1)
+        self.con2 = contraction(2)
+        self.con3 = contraction(3)
+        self.con4 = contraction(4)
+
+        self.up4 = upsample(4)
+        self.exp3 = expansion(3)
+        self.exp2 = expansion(2)
+        self.exp1 = expansion(1)
+        self.output = post_block(num_classes)
+
+    def forward(self, x):
+        c0 = self.input(x)#(1L, 16L, 512L, 512L)
+        c1 = self.con1(c0)#(1L, 32L, 256L, 256L)
+        c2 = self.con2(c1)#(1L, 64L, 128L, 128L)
+        c3 = self.con3(c2)#(1L, 128L, 64L, 64L)
+        c4 = self.con4(c3)#(1L, 256L, 32L, 32L)
+
+        u3 = self.up4(c4)#(1L, 128L, 64L, 64L)
+        u3_c3 = torch.cat((u3, c3), 1)
+
+        u2 = self.exp3(u3_c3)#(1L, 64L, 128L, 128L)
+        u2_c2 = torch.cat((u2, c2), 1)
+
+        u1 = self.exp2(u2_c2)
+        u1_c1 = torch.cat((u1, c1), 1)
+
+        u0 = self.exp1(u1_c1)
+        u0_c0 = torch.cat((u0, c0), 1)
+
+        """print 'c0 : ', c0.size()
+        print 'c1 : ', c1.size()
+        print 'c2 : ', c2.size()
+        print 'c3 : ', c3.size()
+        print 'c4 : ', c4.size()
+        print 'u3 : ', u3.size()
+        print 'u2 : ', u2.size()
+        print 'u1 : ', u1.size()
+        print 'u0 : ', u0.size()"""
+
+        output = self.output(u0_c0)
+
+        return output
+
+if __name__ == "__main__":
+    unet_2d = UNet(1, 2)
+
+    x = torch.rand(1, 1, 320, 480)
+    x = torch.autograd.Variable(x)
+
+    print x.size()
+
+    y = unet_2d(x)
+
+    print "-----------------------------"
+    print y.size()
+
+
+p206-208
+# -*- coding: utf-8 -*-
+import argparse
+import os, sys, glob
+import numpy as np
+import cv2
+from tqdm import tqdm
+from functools import partial
+from multiprocessing import Pool
+
+import config as cfg
+from utils import mkdir
+
+import torch
+from torch.utils.data import Dataset
+
+class UNetDataset(Dataset):
+    def __init__(self, image_list=None, mask_list=None, phase='train'):
+        super(UNetDataset, self).__init__()
+        self.phase = phase
+        #read imgs
+        if phase != 'test':
+            assert mask_list, 'mask list must given when training'
+            self.mask_file_list = mask_list
+
+            self.img_file_list = [f.replace("mask", 'image') for f in mask_list]
+
+            assert len(self.img_file_list) == len(self.mask_file_list), 'the count of image and mask not equal'
+        if phase == 'test':
+            assert image_list, 'image list must given when testing'
+            self.img_file_list = image_list
+
+    def __getitem__(self, idx):
+        img_name = self.img_file_list[idx]
+        img = cv2.imread(img_name, cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.
+        img = np.expand_dims(img, 0)
+
+        mask_name = self.mask_file_list[idx]
+        mask = cv2.imread(mask_name, cv2.IMREAD_GRAYSCALE).astype(int)
+        mask[mask <= 128] = 0
+        mask[mask > 128] = 1
+        mask = np.expand_dims(mask, 0)
+
+        assert (np.array(img.shape[1:]) == np.array(mask.shape[1:])).all(), (img.shape[1:], mask.shape[1:])
+        return torch.from_numpy(img), torch.from_numpy(mask)
+
+    def __len__(self):
+        return len(self.img_file_list)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='create dataset')
+    parser.add_argument('--images', '-l', help='images dir', default='')
+    parser.add_argument('--masks', '-m', help='masks dir', default='')
+    parser.add_argument('--target', '-t', help='target dir', default='')
+    args = parser.parse_args()
+
+    if not args.target:
+        from torch.utils.data import DataLoader
+        import torchvision
+        mask_list = glob.glob('./crack_seg_dir/mask/*.jpg')
+        dataset = UNetDataset(mask_list=mask_list, phase='train')
+        data_loader = DataLoader(
+            dataset,
+            batch_size = 100,
+            shuffle = True,
+            num_workers = 8,
+            pin_memory=False)
+        print len(dataset)
+        count = 0.
+        pos = 0.
+        for i, (data, target) in enumerate(data_loader, 0):
+            if i % 100 == 0:
+                print i
+            count += np.prod(data.size())
+            pos += (data==1).sum()
+        print pos / count
+
+
+p208-209
+Uncaught exception. Entering post mortem debugging
+Running 'cont' or 'step' will restart the program
+(Pdb) (Pdb) (Pdb) (Pdb) (Pdb) (Pdb) (Pdb) (Pdb) (Pdb) Post mortem debugger finished. The lung_segment.py will be restarted
+(Pdb) torch.Size([8, 1, 320, 480]) torch.Size([8, 1, 320, 480])
+torch.Size([8, 2, 320, 480])
+torch.Size([1228800, 2]) torch.Size([1228800])
+torch.Size([1228800, 2]) torch.Size([1228800])
+Epoch: 1 Train loss 0.6964, accuracy 0.6956, time 7.27
+Validation loss 0.6674, accuracy 0.9644, time 2.29
+
+Epoch: 2 Train loss 0.6703, accuracy 0.9167, time 4.63
+Validation loss 0.6541, accuracy 0.9644, time 2.25
+
+Epoch: 3 Train loss 0.6496, accuracy 0.9611, time 4.66
+Validation loss 0.6401, accuracy 0.9644, time 2.26
+
+……
+
+Epoch: 165 Train loss 0.0158, accuracy 0.9941, time 4.67
+Validation loss 0.0270, accuracy 0.9910, time 2.26
+
+Epoch: 166 Train loss 0.0158, accuracy 0.9941, time 4.70
+Validation loss 0.0270, accuracy 0.9912, time 2.28
+
+Epoch: 167 Train loss 0.0165, accuracy 0.9936, time 4.65
+Validation loss 0.0278, accuracy 0.9901, time 2.25
+
+Epoch: 168 Train loss 0.0162, accuracy 0.9938, time 4.64
+Validation loss 0.0273, accuracy 0.9903, time 2.26
+
+Epoch: 169 Train loss 0.0157, accuracy 0.9941, time 4.67
+Validation loss 0.0268, accuracy 0.9910, time 2.26

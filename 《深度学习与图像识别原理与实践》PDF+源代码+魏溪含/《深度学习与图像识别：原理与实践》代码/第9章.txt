@@ -1,0 +1,955 @@
+p159
+def bboxIOU (bboxA, bboxB):
+    A_xmin = bboxA[0]
+    A_ymin = bboxA[1]
+    A_xmax = bboxA[2]
+    A_ymax = bboxA[3]
+    A_width = A_xmax - A_xmin
+    A_height = A_ymax - A_ymin
+
+    B_xmin = bboxB[0]
+    B_ymin = bboxB[1]
+    B_xmax = bboxB[2]
+    B_ymax = bboxB[3]
+    B_width = B_xmax - B_xmin
+    B_height = B_ymax - B_ymin
+
+    xmin = min(A_xmin, B_xmin)
+    ymin = min(A_ymin, B_ymin)
+    xmax = max(A_xmax, B_xmax)
+    ymax = max(A_ymax, B_ymax)
+
+    A_width_and = (A_width + B_width) - (xmax - xmin) #宽的交集
+    A_height_and = (A_height + B_height) - (ymax - ymin) #高的交集
+
+    if ( A_width_and <= 0.0001 or A_height_and <= 0.0001):
+        return 0
+
+    area_and = (A_width_and * A_height_and)
+    area_or = (A_width * A_height) + (B_width * B_height)
+    IOU = area_and / (area_or - area_and)
+
+    return IOU
+
+
+p168-169
+<annotation>
+        <folder>VOC2007</folder>
+        <filename>000032.jpg</filename>
+        <source>
+                <database>The VOC2007 Database</database>
+                <annotation>PASCAL VOC2007</annotation>
+                <image>flickr</image>
+                <flickrid>311023000</flickrid>
+        </source>
+        <owner>
+                <flickrid>-hi-no-to-ri-mo-rt-al-</flickrid>
+                <name>?</name>
+        </owner>
+        <size>
+                <width>500</width>
+                <height>281</height>
+                <depth>3</depth>
+        </size>
+        <segmented>1</segmented>
+        <object>
+                <name>aeroplane</name>
+                <pose>Frontal</pose>
+                <truncated>0</truncated>
+                <difficult>0</difficult>
+                <bndbox>
+                        <xmin>104</xmin>
+                        <ymin>78</ymin>
+                        <xmax>375</xmax>
+                        <ymax>183</ymax>
+                </bndbox>
+        </object>
+        <object>
+                <name>aeroplane</name>
+                <pose>Left</pose>
+                <truncated>0</truncated>
+                <difficult>0</difficult>
+                <bndbox>
+                        <xmin>133</xmin>
+                        <ymin>88</ymin>
+                        <xmax>197</xmax>
+                        <ymax>123</ymax>
+                </bndbox>
+        </object>
+        <object>
+                <name>person</name>
+                <pose>Rear</pose>
+                <truncated>0</truncated>
+                <difficult>0</difficult>
+                <bndbox>
+                        <xmin>195</xmin>
+                        <ymin>180</ymin>
+                        <xmax>213</xmax>
+                        <ymax>229</ymax>
+                </bndbox>
+        </object>
+        <object>
+                <name>person</name>
+                <pose>Rear</pose>
+                <truncated>0</truncated>
+                <difficult>0</difficult>
+                <bndbox>
+                        <xmin>26</xmin>
+                        <ymin>189</ymin>
+                        <xmax>44</xmax>
+                        <ymax>238</ymax>
+                </bndbox>
+        </object>
+</annotation>
+
+
+p171-174
+from os import listdir #解析VOC数据路径时使用
+from os.path import join
+from random import random
+from PIL import Image, ImageDraw
+import xml.etree.ElementTree #用于解析VOC的xmllabel
+
+import torch
+import torch.utils.data as data
+import torchvision.transforms as transforms
+
+from sampling import sampleEzDetect
+
+__all__ = ["vocClassName", "vocClassID", "vocDataset"]
+
+vocClassName = [
+    'aeroplane',
+    'bicycle',
+    'bird',
+    'boat',
+    'bottle',
+    'bus',
+    'car',
+    'cat',
+    'chair',
+    'cow',
+    'diningtable',
+    'dog',
+    'horse',
+    'motorbike',
+    'person',
+    'pottedplant',
+    'sheep',
+    'sofa',
+    'train',
+    'tvmonitor']
+
+def getVOCInfo(xmlFile):
+    root = xml.etree.ElementTree.parse(xmlFile).getroot();
+    anns = root.findall('object')
+
+    bboxes = []
+    for ann in anns:
+        name = ann.find('name').text
+        newAnn = {}
+        newAnn['category_id'] = name
+
+        bbox = ann.find('bndbox')
+        newAnn['bbox'] = [-1,-1,-1,-1]
+        newAnn['bbox'][0] = float( bbox.find('xmin').text )
+        newAnn['bbox'][1] = float( bbox.find('ymin').text )
+        newAnn['bbox'][2] = float( bbox.find('xmax').text )
+        newAnn['bbox'][3] = float( bbox.find('ymax').text )
+        bboxes.append(newAnn)
+
+    return bboxes
+
+class vocDataset(data.Dataset):
+    def __init__(self, config, isTraining=True):
+        super(vocDataset, self).__init__()
+        self.isTraining = isTraining
+        self.config = config
+
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) #用均值和方差对图片的RGB值分别进行归一化（也有其他方法，这种相对比较简单）
+        self.transformer = transforms.Compose([ transforms.ToTensor(), normalize])
+
+    def __getitem__(self, index):
+        item = None
+        if self.isTraining:
+            item = allTrainingData[index % len(allTrainingData)]
+        else:
+            item = allTestingData[index % len(allTestingData)]
+
+        img = Image.open(item[0]) #item[0]为图像数据
+        allBboxes = getVOCInfo(item[1]) #item[1]为通过getVOCInfo函数解析出真实label的数据
+        imgWidth, imgHeight = img.size
+
+        targetWidth = int((random()*0.25 + 0.75) * imgWidth) 
+        targetHeight = int((random()*0.25 + 0.75) * imgHeight)
+
+        # 对图片进行随机crop，并保证bbox大小
+        xmin = int(random() * (imgWidth - targetWidth) )
+        ymin = int(random() * (imgHeight - targetHeight) )
+        img = img.crop((xmin, ymin, xmin + targetWidth, ymin + targetHeight))
+        img = img.resize((self.config.targetWidth, self.config.targetHeight), Image.BILINEAR)
+        imgT = self.transformer(img)
+        imgT = imgT * 256
+
+        # 调整bbox
+        bboxes = []
+        for i in allBboxes:
+            xl = i['bbox'][0] - xmin
+            yt = i['bbox'][1] - ymin
+            xr = i['bbox'][2] - xmin
+            yb = i['bbox'][3] - ymin
+
+            if xl < 0 :
+                xl = 0;
+            if xr >= targetWidth:
+                xr = targetWidth - 1
+            if yt < 0:
+                yt = 0
+            if yb >= targetHeight:
+                yb = targetHeight - 1
+
+            xl = xl / targetWidth
+            xr = xr / targetWidth
+            yt = yt / targetHeight
+            yb = yb / targetHeight
+
+            if (xr-xl >= 0.05 and yb-yt >= 0.05):
+                bbox = [ vocClassID[ i['category_id'] ],
+                         xl, yt, xr, yb ]
+
+                bboxes.append(bbox)
+
+        if len(bboxes) == 0:
+            return self[index+1]
+
+        target = sampleEzDetect(self.config, bboxes);
+
+        '''
+        ### 对预测图片进行测试 ##########
+        draw = ImageDraw.Draw(img)
+        num = int(target[0])
+        for j in range(0,num):
+            offset = j * 6
+            if ( target[offset + 1] < 0):
+                break
+
+            k = int(target[offset + 6])
+            trueBox = [ target[offset + 2],
+                        target[offset + 3],
+                        target[offset + 4],
+                        target[offset + 5] ]
+
+            predBox = self.config.predBoxes[k]
+
+            draw.rectangle([trueBox[0]*self.config.targetWidth,
+                                        trueBox[1]*self.config.targetHeight,
+                                        trueBox[2]*self.config.targetWidth,
+                                        trueBox[3]*self.config.targetHeight])
+
+            draw.rectangle([predBox[0]*self.config.targetWidth,
+                                        predBox[1]*self.config.targetHeight,
+                                        predBox[2]*self.config.targetWidth,
+                                        predBox[3]*self.config.targetHeight], None, "red")
+
+        del draw
+        img.save("/tmp/{}.jpg".format(index) )
+        '''
+
+        return imgT, target
+
+    def __len__(self):
+        if self.isTraining:
+            num = len(allTrainingData) - (len(allTrainingData) % self.config.batchSize)
+            return num
+        else:
+            num = len(allTestingData) - (len(allTestingData) % self.config.batchSize)
+            return num
+
+vocClassID = {}
+for i in range(len(vocClassName)):
+    vocClassID[vocClassName[i]] = i + 1
+
+print vocClassID
+allTrainingData = [] #第167行，该行后面的代码为从VOC2007中读取数据，会在调用voc_dataset.py文件时立即执行
+allTestingData = []
+allFloder = ["./VOCdevkit/VOC2007"] #我们把从VOC网站下载的数据放到本地，只使用VOC2007做实验
+for floder in allFloder:
+    imagePath = join(floder, "JPEGImages")
+    infoPath = join(floder, "Annotations")
+    index = 0
+    
+    for f in listdir(imagePath): #遍历9964张原始图片
+        if f.endswith(".jpg"):
+            imageFile = join(imagePath, f)
+            infoFile = join(infoPath, f[:-4] + ".xml")
+            if index % 10 == 0 : #每10张随机抽1个样本做测试
+                allTestingData.append( (imageFile, infoFile) )
+            else:
+                allTrainingData.append( (imageFile, infoFile) )
+
+            index = index + 1
+
+
+p175-177
+import os
+import math
+import torch
+import torch.nn as nn
+from torch.autograd import Variable
+from torch.autograd import Function
+import torch.nn.functional as F
+import torchvision.models as models
+
+from sampling import buildPredBoxes
+
+__all__ = ["EzDetectConfig", "EzDetectNet", "ReorgModule"]
+
+class EzDetectConfig(object):
+    def __init__(self, batchSize=4, gpu=False):
+        super(EzDetectConfig, self).__init__()
+        self.batchSize = batchSize
+        self.gpu = gpu
+        self.classNumber = 21
+        self.targetWidth = 330
+        self.targetHeight = 330
+        self.featureSize = [[42, 42],       ## L2 1/8
+                             [21, 21],      ## L3 1/16
+                             [11, 11],      ## L4 1/32
+                             [ 6,  6],      ## L5 1/64
+                             [ 3,  3]]      ## L6 1/110
+
+        ##[min, max, ratio, ]
+        priorConfig = [[0.10, 0.25, 2],
+                       [0.25, 0.40, 2, 3],
+                       [0.40, 0.55, 2, 3],
+                       [0.55, 0.70, 2, 3],
+                       [0.70, 0.85, 2]]
+
+        self.mboxes = []
+        for i in range(len(priorConfig)):
+            minSize = priorConfig[i][0]
+            maxSize = priorConfig[i][1]
+            meanSize = math.sqrt(minSize*maxSize)
+            ratios = priorConfig[i][2:]
+
+            # aspect ratio 1 for min and max
+            self.mboxes.append([i, minSize, minSize])
+            self.mboxes.append([i, meanSize, meanSize])
+
+            # other aspect ratio
+            for r in ratios:
+                ar = math.sqrt(r)
+                self.mboxes.append([i, minSize*ar, minSize/ar])
+                self.mboxes.append([i, minSize/ar, minSize*ar])
+
+        self.predBoxes = buildPredBoxes(self)
+
+class EzDetectNet(nn.Module):
+    def __init__(self, config, pretrained=False):
+        super(EzDetectNet, self).__init__()
+
+        self.config = config
+        resnet = models.resnet50(pretrained) #从Pytorch的预训练库中拿到ResNet50模型，直接载入
+
+        self.conv1 = resnet.conv1
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
+        self.layer1 = resnet.layer1
+        self.layer2 = resnet.layer2
+        self.layer3 = resnet.layer3
+        self.layer4 = resnet.layer4
+        self.layer5 = nn.Sequential( #直到第5层才开始自定义，前面都直接复用ResNet50的结构
+            nn.Conv2d(2048, 1024, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(),
+            nn.Conv2d(1024, 1024, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(1024),
+            nn.ReLU())
+
+        self.layer6 = nn.Sequential(
+            nn.Conv2d(1024, 512, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2))
+
+        inChannles = [512, 1024, 2048, 1024, 512]
+        self.locConvs = []
+        self.confConvs = []
+        for i in range(len(config.mboxes)):
+            inSize = inChannles[ config.mboxes[i][0] ]
+            confConv = nn.Conv2d(inSize, config.classNumber, kernel_size=3, stride=1, padding=1, bias=True)
+            locConv = nn.Conv2d(inSize, 4, kernel_size=3, stride=1, padding=1, bias=True)
+
+            self.locConvs.append(locConv)
+            self.confConvs.append(confConv)
+
+            super(EzDetectNet, self).add_module("{}_conf".format(i), confConv)
+            super(EzDetectNet, self).add_module("{}_loc".format(i), locConv)
+
+    def forward(self, x):
+        batchSize = x.size()[0]
+
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        l2 = self.layer2(x)
+        l3 = self.layer3(l2)
+        l4 = self.layer4(l3)
+        l5 = self.layer5(l4)
+        l6 = self.layer6(l5)
+
+        featureSource = [l2, l3, l4, l5, l6]
+
+        confs = []
+        locs = []
+        for i in range(len(self.config.mboxes)):
+            x = featureSource[ self.config.mboxes[i][0] ]
+
+            loc = self.locConvs[i](x)
+            loc = loc.permute(0, 2, 3, 1)
+            loc = loc.contiguous()
+            loc = loc.view(batchSize, -1, 4)
+            locs.append(loc)
+
+            conf = self.confConvs[i](x)
+            conf = conf.permute(0, 2, 3, 1)
+            conf = conf.contiguous()
+            conf = conf.view(batchSize, -1, self.config.classNumber)
+            confs.append(conf)
+
+        locResult = torch.cat(locs, 1)
+        confResult = torch.cat(confs, 1)
+
+        return confResult, locResult
+
+
+p178
+ for i in range(len(config.mboxes)):
+            inSize = inChannles[ config.mboxes[i][0] ]
+            confConv = nn.Conv2d(inSize, config.classNumber, kernel_size=3, stride=1, padding=1, bias=True)
+            locConv = nn.Conv2d(inSize, 4, kernel_size=3, stride=1, padding=1, bias=True)
+
+            self.locConvs.append(locConv)
+            self.confConvs.append(confConv)
+
+            super(EzDetectNet, self).add_module("{}_conf".format(i), confConv)
+            super(EzDetectNet, self).add_module("{}_loc".format(i), locConv)
+
+
+p178-181
+import torch
+import torch.nn as nn
+from torch.autograd import Variable
+from torch.autograd import Function
+import torch.nn.functional as F
+
+from bbox import bboxIOU, encodeBox
+
+__all__ = ["EzDetectLoss"]
+
+def buildbboxTarget(config, bboxOut, target):
+    bboxMasks = torch.ByteTensor(bboxOut.size())
+    bboxMasks.zero_()
+    bboxTarget = torch.FloatTensor(bboxOut.size())
+
+    batchSize = target.size()[0]
+
+    for i in range(0, batchSize):
+        num = int(target[i][0])
+
+        for j in range(0,num):
+            offset = j * 6
+            cls = int(target[i][offset + 1])
+            k = int(target[i][offset + 6])
+            trueBox = [ target[i][offset + 2],
+                        target[i][offset + 3],
+                        target[i][offset + 4],
+                        target[i][offset + 5] ]
+
+            predBox = config.predBoxes[k]
+            ebox = encodeBox(config, trueBox, predBox)
+
+            bboxMasks[i, k, :] = 1
+            bboxTarget[i, k, 0] = ebox[0]
+            bboxTarget[i, k, 1] = ebox[1]
+            bboxTarget[i, k, 2] = ebox[2]
+            bboxTarget[i, k, 3] = ebox[3]
+
+    if ( config.gpu ):
+        bboxMasks = bboxMasks.cuda()
+        bboxTarget = bboxTarget.cuda()
+
+    return bboxMasks, bboxTarget
+
+def buildConfTarget(config, confOut, target):
+    batchSize = confOut.size()[0]
+    boxNumber = confOut.size()[1]
+
+    confTarget = torch.LongTensor(batchSize, boxNumber, config.classNumber)
+    confMasks = torch.ByteTensor(confOut.size())
+    confMasks.zero_()
+
+    confScore = torch.nn.functional.log_softmax( Variable(confOut.view(-1, config.classNumber), requires_grad = False) )
+    confScore = confScore.data.view(batchSize, boxNumber, config.classNumber)
+
+    # positive samples
+    pnum = 0
+    for i in range(0, batchSize):
+        num = int(target[i][0])
+
+        for j in range(0,num):
+            offset = j * 6
+
+            k = int(target[i][offset + 6])
+            cls = int(target[i][offset + 1])
+            if cls > 0:
+                confMasks[i, k, :] = 1
+                confTarget[i, k, :] = cls
+                confScore[i, k, :] = 0
+                pnum = pnum + 1
+            else:
+                confScore[i, k, :] = 0
+                '''
+                cls = cls * -1
+                confMasks[i, k, :] = 1
+                confTarget[i, k, :] = cls
+                confScore[i, k, :] = 0
+                pnum = pnum + 1
+                '''
+
+    # negtive samples (background)
+    confScore = confScore.view(-1, config.classNumber)
+    confScore = confScore[:, 0].contiguous().view(-1)
+
+    scoreValue, scoreIndex = torch.sort(confScore, 0, descending=False)
+
+    for i in range(pnum*3):
+        b = scoreIndex[i] // boxNumber
+        k = scoreIndex[i] % boxNumber
+        if ( confMasks[b,k,0] > 0):
+            break
+        confMasks[b, k, :] = 1
+        confTarget[b, k, :] = 0
+
+    if ( config.gpu ):
+        confMasks = confMasks.cuda()
+        confTarget = confTarget.cuda()
+
+    return confMasks, confTarget
+
+class EzDetectLoss(nn.Module):
+    def __init__(self, config, pretrained=False):
+        super(EzDetectLoss, self).__init__()
+        self.config = config
+        self.confLoss = nn.CrossEntropyLoss()
+        self.bboxLoss = nn.SmoothL1Loss()
+
+    def forward(self, confOut, bboxOut, target):
+        batchSize = target.size()[0]
+
+        # building loss of conf
+        confMasks, confTarget = buildConfTarget(self.config, confOut.data, target)
+        confSamples = confOut[confMasks].view(-1, self.config.classNumber)
+
+        confTarget = confTarget[confMasks].view(-1, self.config.classNumber)
+        confTarget = confTarget[:, 0].contiguous().view(-1)
+        confTarget = Variable(confTarget, requires_grad = False)
+        confLoss = self.confLoss(confSamples, confTarget)
+
+        # building loss of bbox
+        bboxMasks, bboxTarget = buildbboxTarget(self.config, bboxOut.data, target)
+
+        bboxSamples = bboxOut[bboxMasks].view(-1, 4)
+        bboxTarget = bboxTarget[bboxMasks].view(-1, 4)
+        bboxTarget = Variable(bboxTarget)
+        bboxLoss = self.bboxLoss(bboxSamples, bboxTarget)
+
+        return confLoss, bboxLoss
+
+
+p181-183
+import random
+import torch
+import torch.nn as nn
+from torch.autograd import Variable
+from torch.autograd import Function
+
+from bbox import bboxIOU
+
+__all__ = ["buildPredBoxes", "sampleEzDetect"]
+
+def buildPredBoxes(config):
+    predBoxes = []
+
+    for i in range(len(config.mboxes)):
+        l = config.mboxes[i][0]
+        wid = config.featureSize[l][0]
+        hei = config.featureSize[l][1]
+
+        wbox = config.mboxes[i][1]
+        hbox = config.mboxes[i][2]
+
+        for y in range(hei):
+            for x in range(wid):
+                xc = (x + 0.5) / wid #x y位置都取每个feature map像素的中心点来计算
+                yc = (y + 0.5) / hei
+                '''
+                xmin = max(0, xc-wbox/2)
+                ymin = max(0, yc-hbox/2)
+                xmax = min(1, xc+wbox/2)
+                ymax = min(1, yc+hbox/2)
+                '''
+                xmin = xc-wbox/2
+                ymin = yc-hbox/2
+                xmax = xc+wbox/2
+                ymax = yc+hbox/2
+
+                predBoxes.append([xmin, ymin, xmax, ymax])
+
+    return predBoxes
+
+def sampleEzDetect(config, bboxes): #在voc_dataset.py的vocDataset类中用到的sampleEzDetect函数
+    ## preparing pred boxes
+    predBoxes = config.predBoxes
+
+    ## preparing groud truth
+    truthBoxes = []
+    for i in range(len(bboxes)):
+        truthBoxes.append( [bboxes[i][1], bboxes[i][2], bboxes[i][3], bboxes[i][4]] )
+
+    ## computing iou
+    iouMatrix = []
+    for i in predBoxes:
+        ious = []
+        for j in truthBoxes:
+            ious.append( bboxIOU(i, j) )
+        iouMatrix.append(ious)
+
+    iouMatrix = torch.FloatTensor( iouMatrix )
+    iouMatrix2 = iouMatrix.clone()
+
+    ii = 0
+    selectedSamples = torch.FloatTensor(128*1024)
+
+    ## positive samples from bi-direction match
+    for i in range(len(bboxes)):
+        iouViewer = iouMatrix.view(-1)
+        iouValues, iouSequence = torch.max(iouViewer, 0)
+
+        predIndex = iouSequence[0] // len(bboxes)
+        bboxIndex = iouSequence[0] % len(bboxes)
+
+        if ( iouValues[0] > 0.1):
+            selectedSamples[ii*6 + 1] = bboxes[bboxIndex][0]
+            selectedSamples[ii*6 + 2] = bboxes[bboxIndex][1]
+            selectedSamples[ii*6 + 3] = bboxes[bboxIndex][2]
+            selectedSamples[ii*6 + 4] = bboxes[bboxIndex][3]
+            selectedSamples[ii*6 + 5] = bboxes[bboxIndex][4]
+            selectedSamples[ii*6 + 6] = predIndex
+            ii  = ii + 1
+        else:
+            break
+
+        iouMatrix[:, bboxIndex] = -1
+        iouMatrix[predIndex, :] = -1
+        iouMatrix2[predIndex,:] = -1
+
+    ## also samples with high iou
+    for i in range(len(predBoxes)):
+        v,_ = iouMatrix2[i].max(0)
+        predIndex = i
+        bboxIndex = _[0]
+
+        if ( v[0] > 0.7): #anchor与真实值iou大于0.7的为正样本
+            selectedSamples[ii*6 + 1] = bboxes[bboxIndex][0]
+            selectedSamples[ii*6 + 2] = bboxes[bboxIndex][1]
+            selectedSamples[ii*6 + 3] = bboxes[bboxIndex][2]
+            selectedSamples[ii*6 + 4] = bboxes[bboxIndex][3]
+            selectedSamples[ii*6 + 5] = bboxes[bboxIndex][4]
+            selectedSamples[ii*6 + 6] = predIndex
+            ii  = ii + 1
+
+        elif (v[0] > 0.5): 
+            selectedSamples[ii*6 + 1] = bboxes[bboxIndex][0] * -1
+            selectedSamples[ii*6 + 2] = bboxes[bboxIndex][1]
+            selectedSamples[ii*6 + 3] = bboxes[bboxIndex][2]
+            selectedSamples[ii*6 + 4] = bboxes[bboxIndex][3]
+            selectedSamples[ii*6 + 5] = bboxes[bboxIndex][4]
+            selectedSamples[ii*6 + 6] = predIndex
+            ii  = ii + 1
+
+    selectedSamples[0] = ii
+    return selectedSamples
+
+
+p184
+def encodeBox(config, box, predBox):
+    pcx = (predBox[0] + predBox[2]) / 2
+    pcy = (predBox[1] + predBox[3]) / 2
+    pw = (predBox[2] - predBox[0])
+    ph = (predBox[3] - predBox[1])
+
+    ecx = (box[0] + box[2]) / 2 - pcx
+    ecy = (box[1] + box[3]) / 2 - pcy
+    ecx = ecx / pw * 10
+    ecy = ecy / ph * 10
+
+    ew = (box[2] - box[0]) / pw
+    eh = (box[3] - box[1]) / ph
+    ew = math.log(ew) * 5
+    eh = math.log(eh) * 5
+
+    return[ecx, ecy, ew, eh]
+
+def decodeAllBox(config, allBox):
+    newBoxes = torch.FloatTensor(allBox.size())
+
+    batchSize = newBoxes.size()[0]
+    for k in range(len(config.predBoxes)):
+        predBox = config.predBoxes[k]
+        pcx = (predBox[0] + predBox[2]) / 2
+        pcy = (predBox[1] + predBox[3]) / 2
+        pw = (predBox[2] - predBox[0])
+        ph = (predBox[3] - predBox[1])
+
+        for i in range(batchSize):
+            box = allBox[i, k, :]
+
+            dcx = box[0] / 10 * pw + pcx
+            dcy = box[1] / 10 * ph + pcy
+
+            dw = math.exp(box[2]/5) * pw
+            dh = math.exp(box[3]/5) * ph
+
+            newBoxes[i, k, 0] = max(0, dcx - dw/2)
+            newBoxes[i, k, 1] = max(0, dcy - dh/2)
+            newBoxes[i, k, 2] = min(1, dcx + dw/2)
+            newBoxes[i, k, 3] = min(1, dcy + dh/2)
+
+    if config.gpu :
+       newBoxes = newBoxes.cuda()
+
+    return newBoxes
+
+
+p185
+import sys
+import math
+import torch
+
+__all__ = ["bboxIOU", "encodeBox", "decodeAllBox", "doNMS"]
+
+def doNMS(config, classMap, allBoxes, threshold):
+
+    winBoxes = []
+
+    predBoxes = config.predBoxes
+
+    for c in range(1, config.classNumber):
+        fscore = classMap[:, c]
+        #print(fscore)
+
+        v,s = torch.sort(fscore, 0, descending=True)
+        print(">>>>>>>>>>>>>>>",c,v[0])
+        for i in range(len(v)):
+            if ( v[i] < threshold):
+                continue
+
+            k = s[i]
+            boxA = [allBoxes[k, 0], allBoxes[k, 1], allBoxes[k, 2], allBoxes[k, 3]]
+
+            for j in range(i+1, len(v)):
+                if ( v[j] < threshold):
+                    continue
+
+                k = s[j]
+                boxB = [allBoxes[k, 0], allBoxes[k, 1], allBoxes[k, 2], allBoxes[k, 3]]
+
+                iouValue = bboxIOU(boxA, boxB)
+                if ( iouValue > 0.5):
+                    v[j] = 0
+
+        for i in range(len(v)):
+            if ( v[i] < threshold):
+                continue
+
+            k = s[i]
+            #box = [predBoxes[k][0], predBoxes[k][1], predBoxes[k][2], predBoxes[k][3]]
+            box = [allBoxes[k, 0], allBoxes[k, 1], allBoxes[k, 2], allBoxes[k, 3]]
+
+            winBoxes.append(box)
+    return winBoxes
+
+
+p186-188
+from __future__ import print_function
+import argparse
+from math import log10
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.autograd import Variable
+from torch.utils.data import DataLoader
+
+from voc_dataset import vocDataset as DataSet
+#from dummy_dataset import dummyDataSet as DataSet
+from model import EzDetectNet
+from model import EzDetectConfig
+from loss import EzDetectLoss
+
+# Training settings
+parser = argparse.ArgumentParser(description='EasyDetect by pytorch')
+parser.add_argument('--batchSize', type=int, default=16, help='training batch size')
+parser.add_argument('--testBatchSize', type=int, default=4, help='testing batch size')
+parser.add_argument('--lr', type=float, default=0.001, help='Learning Rate. Default=0.01')
+parser.add_argument('--threads', type=int, default=4, help='number of threads for data loader to use')
+parser.add_argument('--seed', type=int, default=1024, help='random seed to use. Default=123')
+parser.add_argument('--gpu', dest='gpu', action='store_true')
+#parser.add_argument('--no-gpu', dest='gpu', action='store_false')
+parser.set_defaults(gpu=True)
+opt = parser.parse_args()
+torch.cuda.set_device(1)
+
+print('===> Loading datasets')
+ezConfig = EzDetectConfig(opt.batchSize, opt.gpu)
+train_set = DataSet(ezConfig, True)
+test_set = DataSet(ezConfig, False)
+train_data_loader = DataLoader(dataset=train_set,
+                               num_workers=opt.threads,
+                               batch_size=opt.batchSize,
+                               shuffle=True)
+
+test_data_loader = DataLoader(dataset=test_set,
+                               num_workers=opt.threads,
+                               batch_size=opt.batchSize)
+
+print('===> Building model')
+mymodel = EzDetectNet(ezConfig, True)
+myloss = EzDetectLoss(ezConfig)
+optimizer = optim.SGD(mymodel.parameters(), lr=opt.lr, momentum=0.9, weight_decay=1e-4) #使用随机梯度下降方法
+#optimizer = optim.Adam(mymodel.parameters(), lr=opt.lr)
+
+if ezConfig.gpu == True: #使用gpu
+    mymodel.cuda()
+    myloss.cuda()
+
+def adjust_learning_rate(optimizer, epoch):
+    """每迭代10个epoch，学习率下降0.1倍"""
+    lr = opt.lr * (0.1 ** (epoch // 10))
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+def doTrain(t):
+    mymodel.train()
+    for i, batch in enumerate(train_data_loader):
+        batchX = batch[0]
+        target = batch[1]
+        if ezConfig.gpu:
+            batchX = batch[0].cuda()
+            target = batch[1].cuda()
+
+        x = torch.autograd.Variable(batchX, requires_grad=False)
+        confOut, bboxOut = mymodel(x)
+
+        confLoss, bboxLoss = myloss(confOut, bboxOut, target)
+        totalLoss = confLoss*4 + bboxLoss
+
+        print(confLoss, bboxLoss)
+        print("{} : {} / {} >>>>>>>>>>>>>>>>>>>>>>>>: {}".format(t, i, len(train_data_loader), totalLoss.data[0]))
+
+        optimizer.zero_grad()
+        totalLoss.backward()
+        optimizer.step()
+
+def doValidate():
+    mymodel.eval()
+    lossSum = 0.0
+    for i, batch in enumerate(test_data_loader):
+        batchX = batch[0]
+        target = batch[1]
+        if ezConfig.gpu:
+            batchX = batch[0].cuda()
+            target = batch[1].cuda()
+
+        x = torch.autograd.Variable(batchX, requires_grad=False)
+        confOut, bboxOut = mymodel(x)
+
+        confLoss, bboxLoss = myloss(confOut, bboxOut, target)
+        totalLoss = confLoss*4 + bboxLoss
+
+        print(confLoss, bboxLoss)
+        print("Test : {} / {} >>>>>>>>>>>>>>>>>>>>>>>>: {}".format(i, len(test_data_loader), totalLoss.data[0]))
+
+        lossSum = totalLoss.data[0] + lossSum
+    score = lossSum / len(test_data_loader)
+    print("########:{}".format(score))
+    return score
+
+####### main function ########
+for t in range(50):
+    adjust_learning_rate(optimizer, t)
+    doTrain(t)
+    score = doValidate()
+    if ( t %5 == 0):
+        torch.save(mymodel.state_dict(), "model/model_{}_{}.pth".format(t, str(score)[:4]))
+
+
+p189-190
+import sys
+from PIL import Image, ImageDraw
+import torch
+from torch.autograd import Variable
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
+
+from model import EzDetectConfig
+from model import EzDetectNet
+
+from bbox import decodeAllBox, doNMS
+
+ezConfig = EzDetectConfig()
+ezConfig.batchSize = 1
+
+mymodel = EzDetectNet(ezConfig, True)
+mymodel.load_state_dict(torch.load(sys.argv[1]))
+print "finish load model"
+normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+transformer = transforms.Compose([transforms.ToTensor(),normalize])
+
+img = Image.open(sys.argv[2])
+originImage = img
+
+img = img.resize((ezConfig.targetWidth, ezConfig.targetHeight), Image.BILINEAR)
+img = transformer(img)
+img = img*256
+img = img.view(1, 3, ezConfig.targetHeight, ezConfig.targetWidth)
+print "finish preprocess image"
+
+img = img.cuda()
+mymodel.cuda()
+
+classOut, bboxOut = mymodel(Variable(img))
+bboxOut = bboxOut.float()
+bboxOut = decodeAllBox(ezConfig, bboxOut.data)
+
+classScore = torch.nn.Softmax()(classOut[0])
+bestBox = doNMS(ezConfig, classScore.data.float(), bboxOut[0], 0.15)
+
+draw = ImageDraw.Draw(originImage)
+imgWidth, imgHeight = originImage.size
+for b in bestBox:
+    draw.rectangle([b[0]*imgWidth, b[1]*imgHeight,
+                    b[2]*imgWidth, b[3]*imgHeight])
+
+del draw
+
+print "finish draw boxes"
+originImage.save("1.jpg")
+print "finish all!"

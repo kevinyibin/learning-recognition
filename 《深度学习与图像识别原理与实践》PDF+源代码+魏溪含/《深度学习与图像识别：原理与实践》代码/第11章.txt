@@ -1,0 +1,296 @@
+p219-220
+# -*- coding: utf-8 -*-
+from __future__ import print_function
+#%matplotlib inline
+import argparse
+import os
+import random
+import torch
+import torch.nn as nn
+import torch.nn.parallel
+import torch.backends.cudnn as cudnn
+import torch.optim as optim
+import torch.utils.data
+import torchvision.datasets as dset
+import torchvision.transforms as transforms
+import torchvision.utils as vutils
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from IPython.display import HTML
+
+# 设置随机种子
+manualSeed = 999
+#manualSeed = random.randint(1, 10000) # 想获取新结果时使用
+print("Random Seed: ", manualSeed)
+random.seed(manualSeed)
+torch.manual_seed(manualSeed)
+
+dataroot = "data/celeba" #数据集的根目录
+workers = 2 #载数据的线程数量
+batch_size = 128 #训练过程batch大小
+image_size = 64 #训练图片大小，所有图片均需要缩放到这个尺寸
+nc = 3 #通道数量，通常彩色图就是rgb三个值
+nz = 100 #产生网络输入向量的大小
+ngf = 64 #产生网络特征层的大小
+ndf = 64 #判别网络的特征层的大小
+num_epochs = 5 #训练数据集迭代次数
+lr = 0.0002 #学习率
+beta1 = 0.5 #Adam最优化方法中的超参 beta1
+ngpu = 1 #可用的gpu数量（0为cpu模式）
+
+
+# 创建数据集（包含各种初始化）
+dataset = dset.ImageFolder(root=dataroot,
+                           transform=transforms.Compose([
+                               transforms.Resize(image_size),
+                               transforms.CenterCrop(image_size),
+                               transforms.ToTensor(),
+                               transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                           ]))
+# 创建数据载入器 DataLoader
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size,
+                                         shuffle=True, num_workers=workers)
+
+# 设置训练需要的处理器
+device = torch.device("cuda:0" if (torch.cuda.is_available() and ngpu > 0) else "cpu")
+
+
+p221-222
+
+# 产生网络代码
+class Generator(nn.Module):
+    def __init__(self, ngpu):
+        super(Generator, self).__init__()
+        self.ngpu = ngpu
+        self.main = nn.Sequential(
+            # 输入向量z，通过第一个反卷积
+            # 将100的向量z输入，输出channel设置为(ngf*8)，经过如下操作 
+            # class torch.nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0, groups=1, bias=True, dilation=1)
+            # 后得到(ngf*8) x 4 x 4，即长宽为4，channel为ngf*8的特征层
+            nn.ConvTranspose2d( nz, ngf * 8, 4, 1, 0, bias=False), #这里的ConvTranspose2d类似于deconv，前面第 章介绍过原理
+            nn.BatchNorm2d(ngf * 8),
+            nn.ReLU(True),
+            
+            # 继续对特征层进行反卷积，得到长宽为8，channel为ngf*4的特征层  (ngf*4) x 8 x 8
+            nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 4),
+            nn.ReLU(True),
+            
+            # 继续对特征层进行反卷积，得到长宽为16，channel为ngf*2的特征层  (ngf*2) x 16 x 16
+            nn.ConvTranspose2d( ngf * 4, ngf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 2),
+            nn.ReLU(True),
+            
+            # 继续对特征层进行反卷积，得到长宽为32，channel为ngf的特征层  (ngf) x 32 x 32
+            nn.ConvTranspose2d( ngf * 2, ngf, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+            
+            # 继续对特征层进行反卷积，得到长宽为64，channel为nc的特征层  (nc) x 64 x 64
+            nn.ConvTranspose2d( ngf, nc, 4, 2, 1, bias=False),
+            nn.Tanh()
+        )
+
+    def forward(self, input):
+        return self.main(input)
+
+################################################################
+#### 将产生网络实例化 ####
+# 创建生成器
+netG = Generator(ngpu).to(device)
+
+# 处理多gpu情况
+if (device.type == 'cuda') and (ngpu > 1):
+    netG = nn.DataParallel(netG, list(range(ngpu)))
+
+# 应用weights_init函数对随机初始化进行重置，改为服从mean=0, stdev=0.2的正态分布的初始化
+netG.apply(weights_init)
+
+
+p223
+# 判别网络代码
+class Discriminator(nn.Module):
+    def __init__(self, ngpu):
+        super(Discriminator, self).__init__()
+        self.ngpu = ngpu
+        self.main = nn.Sequential(
+            # 输入为一张宽高为64，channel为nc的一张图片，得到宽高为32，channel为ndf的一张图片  (ndf) x 32 x 32
+            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            
+            # 经过第2次卷积 得到宽高为16，channel为ndf*2的一张图片 (ndf*2) x 16 x 16
+            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 2), #使用大尺度的步长来代替下采样（pooling），这样可以更好地学习降采样的方法
+            nn.LeakyReLU(0.2, inplace=True),
+            # 经过第3次卷积 得到宽高为8，channel为ndf*4的一张图片  (ndf*4) x 8 x 8
+            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 经过第4次卷积 得到宽高为4，channel为ndf*8的一张图片  (ndf*8) x 4 x 4
+            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            # 经过第5次卷积并过sigmoid层，得最终一个概率输出值
+            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
+            nn.Sigmoid() #最终通过Sigmoid激活函数输出该张图片是真实图片的概率
+        )
+
+    def forward(self, input):
+        return self.main(input)
+
+#### 将判别网络实例化 ####
+# 创建判别器
+netD = Discriminator(ngpu).to(device)
+
+# 处理多gpu情况
+if (device.type == 'cuda') and (ngpu > 1):
+    netD = nn.DataParallel(netD, list(range(ngpu)))
+    
+# 应用weights_init函数对随机初始化进行重置，改为服从mean=0, stdev=0.2的正态分布的初始化
+netD.apply(weights_init)
+
+
+p225-226
+本小节给出GAN训练过程的代码。GAN很不好训练，很多超参数需要仔细调整，稍有不慎便不收敛。为了更好地训练，这里对于真图片和假图片构建不同的batch并且分别进行训练。整个训练分为两个部分：第一部分更新判别网络，第二部分更新产生网络。# 训练过程：主循环
+img_list = []
+G_losses = []
+D_losses = []
+iters = 0
+
+print("Starting Training Loop...")
+for epoch in range(num_epochs): # 训练集迭代的次数
+    for i, data in enumerate(dataloader, 0): #循环每个dataloader中的batch
+        
+        ############################
+        # (1) 更新判别网络：最大化 log(D(x)) + log(1 - D(G(z)))
+        ###########################
+        ## 用全部都是真图片的batch训练
+        netD.zero_grad()
+        # 格式化batch
+        real_cpu = data[0].to(device)
+        b_size = real_cpu.size(0)
+        label = torch.full((b_size,), real_label, device=device)
+        # 将带有正样本的batch，输入到判别网络 中进行前向计算，得到结果放到变量output中
+        output = netD(real_cpu).view(-1)
+        # 计算loss
+        errD_real = criterion(output, label)
+        # 计算梯度
+        errD_real.backward()
+        D_x = output.mean().item()
+
+        ## 用全部都是假图片的batch训练
+        # 先产生网络的输入向量
+        noise = torch.randn(b_size, nz, 1, 1, device=device)
+        # 通过产生网络生成假的样本图片
+        fake = netG(noise)
+        label.fill_(fake_label)
+        # 将生成的全部假图片输入到判别网络中进行前向计算，得到结果放到变量output中
+        output = netD(fake.detach()).view(-1)
+        # 在假图片batch中计算刚刚判别网络的loss
+        errD_fake = criterion(output, label)
+        # 计算该batch的梯度
+        errD_fake.backward()
+        D_G_z1 = output.mean().item()
+        # 将真图片与假图片的误差加和
+        errD = errD_real + errD_fake
+        # 更新判别网络D
+        optimizerD.step()
+
+        ############################
+        # (2) 更新产生网络： 最大化 log(D(G(z)))
+        ###########################
+        netG.zero_grad()
+        label.fill_(real_label)  # 产生网络的标签是真实的图片
+        # 由于刚刚更新了判别网络，这里让假数据再过一遍判别网络，用来计算产生网络的loss并回传
+        output = netD(fake).view(-1)
+        errG = criterion(output, label)
+        errG.backward()
+        D_G_z2 = output.mean().item()
+        # 更新产生网络G
+        optimizerG.step()
+        
+        # 打印训练状态
+        if i % 50 == 0:
+            print('[%d/%d][%d/%d]\tLoss_D: %.4f\tLoss_G: %.4f\tD(x): %.4f\tD(G(z)): %.4f / %.4f'
+                  % (epoch, num_epochs, i, len(dataloader),
+                     errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
+        
+        # 保存loss，用于后续画图
+        G_losses.append(errG.item())
+        D_losses.append(errD.item())
+        
+        # 保留产生网络生成的图片，后续用来看生成的图片效果 
+        if (iters % 500 == 0) or ((epoch == num_epochs-1) and (i == len(dataloader)-1)):
+            with torch.no_grad():
+                fake = netG(fixed_noise).detach().cpu()
+            img_list.append(vutils.make_grid(fake, padding=2, normalize=True))
+            
+        iters += 1
+
+
+p226-227
+Starting Training Loop...
+[0/5][0/1583]   Loss_D: 1.7410  Loss_G: 4.7761  D(x): 0.5343    D(G(z)): 0.5771 / 0.0136
+[0/5][50/1583]  Loss_D: 1.7332  Loss_G: 25.4829 D(x): 0.9774    D(G(z)): 0.7441 / 0.0000
+[0/5][100/1583] Loss_D: 1.6841  Loss_G: 11.6585 D(x): 0.4728    D(G(z)): 0.0000 / 0.0000
+[0/5][150/1583] Loss_D: 1.2547  Loss_G: 8.7245  D(x): 0.9286    D(G(z)): 0.5209 / 0.0044
+[0/5][200/1583] Loss_D: 0.7563  Loss_G: 8.9600  D(x): 0.9525    D(G(z)): 0.4514 / 0.0003
+
+……
+[0/5][800/1583] Loss_D: 0.5795  Loss_G: 6.0537  D(x): 0.8693    D(G(z)): 0.2732 / 0.0066
+[0/5][850/1583] Loss_D: 0.8980  Loss_G: 6.5355  D(x): 0.8465    D(G(z)): 0.4226 / 0.0048
+[0/5][900/1583] Loss_D: 0.5776  Loss_G: 7.7162  D(x): 0.9756    D(G(z)): 0.3707 / 0.0009
+[0/5][950/1583] Loss_D: 0.5593  Loss_G: 5.6692  D(x): 0.9560    D(G(z)): 0.3494 / 0.0080
+[0/5][1000/1583]        Loss_D: 0.5036  Loss_G: 5.1312  D(x): 0.7775    D(G(z)): 0.0959 / 0.0178
+[0/5][1050/1583]        Loss_D: 0.5192  Loss_G: 4.5706  D(x): 0.8578    D(G(z)): 0.2605 / 0.0222
+[0/5][1100/1583]        Loss_D: 0.5645  Loss_G: 3.1618  D(x): 0.7133    D(G(z)): 0.1138 / 0.0768
+……
+[0/5][1500/1583]        Loss_D: 0.4432  Loss_G: 3.3681  D(x): 0.8001    D(G(z)): 0.1510 / 0.0633
+[0/5][1550/1583]        Loss_D: 0.4852  Loss_G: 3.2790  D(x): 0.7532    D(G(z)): 0.1100 / 0.0661
+[1/5][0/1583]   Loss_D: 0.3536  Loss_G: 4.5358  D(x): 0.8829    D(G(z)): 0.1714 / 0.0173
+[1/5][50/1583]  Loss_D: 0.4717  Loss_G: 4.7728  D(x): 0.8973    D(G(z)): 0.2750 / 0.0142
+[1/5][100/1583] Loss_D: 0.4702  Loss_G: 2.3528  D(x): 0.7847    D(G(z)): 0.1468 / 0.1385
+……
+[1/5][900/1583] Loss_D: 0.8799  Loss_G: 4.7930  D(x): 0.9050    D(G(z)): 0.4710 / 0.0201
+[1/5][950/1583] Loss_D: 0.3909  Loss_G: 2.7973  D(x): 0.7730    D(G(z)): 0.0902 / 0.0838
+[1/5][1000/1583]        Loss_D: 0.3822  Loss_G: 3.0223  D(x): 0.8699    D(G(z)): 0.1837 / 0.0709
+[1/5][1050/1583]        Loss_D: 0.4689  Loss_G: 2.2831  D(x): 0.7096    D(G(z)): 0.0536 / 0.1448
+[1/5][1100/1583]        Loss_D: 0.6676  Loss_G: 2.2773  D(x): 0.6669    D(G(z)): 0.1386 / 0.1443
+……
+[1/5][1500/1583]        Loss_D: 0.7999  Loss_G: 3.7268  D(x): 0.9029    D(G(z)): 0.4550 / 0.0384
+[1/5][1550/1583]        Loss_D: 0.4740  Loss_G: 2.3220  D(x): 0.7824    D(G(z)): 0.1625 / 0.1327
+[2/5][0/1583]   Loss_D: 0.8693  Loss_G: 3.8890  D(x): 0.9376    D(G(z)): 0.4822 / 0.0339
+[2/5][50/1583]  Loss_D: 0.3742  Loss_G: 2.5041  D(x): 0.8148    D(G(z)): 0.1310 / 0.1151
+[2/5][100/1583] Loss_D: 1.1134  Loss_G: 1.5167  D(x): 0.4248    D(G(z)): 0.0335 / 0.3023
+……
+[2/5][900/1583] Loss_D: 0.5184  Loss_G: 2.7194  D(x): 0.8377    D(G(z)): 0.2540 / 0.0871
+[2/5][950/1583] Loss_D: 0.9771  Loss_G: 4.6200  D(x): 0.9596    D(G(z)): 0.5432 / 0.0176
+[2/5][1000/1583]        Loss_D: 0.7509  Loss_G: 2.2864  D(x): 0.5861    D(G(z)): 0.1021 / 0.1539
+[2/5][1050/1583]        Loss_D: 0.4512  Loss_G: 3.2484  D(x): 0.8649    D(G(z)): 0.2313 / 0.0542
+[2/5][1100/1583]        Loss_D: 0.6856  Loss_G: 2.2425  D(x): 0.6405    D(G(z)): 0.1333 / 0.1508
+……
+[2/5][1500/1583]        Loss_D: 0.9446  Loss_G: 1.1492  D(x): 0.4593    D(G(z)): 0.0356 / 0.3947
+[2/5][1550/1583]        Loss_D: 0.9269  Loss_G: 0.7383  D(x): 0.5226    D(G(z)): 0.1333 / 0.5205
+[3/5][0/1583]   Loss_D: 0.4855  Loss_G: 2.1548  D(x): 0.7157    D(G(z)): 0.1059 / 0.1568
+[3/5][50/1583]  Loss_D: 0.7259  Loss_G: 1.1093  D(x): 0.5804    D(G(z)): 0.0797 / 0.3894
+[3/5][100/1583] Loss_D: 0.7367  Loss_G: 1.0389  D(x): 0.5515    D(G(z)): 0.0405 / 0.4190
+……
+[3/5][900/1583] Loss_D: 0.7340  Loss_G: 1.4263  D(x): 0.6285    D(G(z)): 0.1806 / 0.2818
+[3/5][950/1583] Loss_D: 1.4633  Loss_G: 4.9204  D(x): 0.9792    D(G(z)): 0.7093 / 0.0143
+[3/5][1000/1583]        Loss_D: 0.6643  Loss_G: 2.8332  D(x): 0.8548    D(G(z)): 0.3597 / 0.0751
+[3/5][1050/1583]        Loss_D: 0.7741  Loss_G: 2.9355  D(x): 0.7281    D(G(z)): 0.3064 / 0.0712
+[3/5][1100/1583]        Loss_D: 0.7279  Loss_G: 3.2299  D(x): 0.8867    D(G(z)): 0.4193 / 0.0544
+……
+[3/5][1500/1583]        Loss_D: 0.6055  Loss_G: 1.8402  D(x): 0.7011    D(G(z)): 0.1643 / 0.1995
+[3/5][1550/1583]        Loss_D: 0.7240  Loss_G: 3.2589  D(x): 0.8747    D(G(z)): 0.4069 / 0.0528
+[4/5][0/1583]   Loss_D: 0.8162  Loss_G: 2.8040  D(x): 0.8827    D(G(z)): 0.4435 / 0.0870
+[4/5][50/1583]  Loss_D: 0.5859  Loss_G: 2.2796  D(x): 0.6782    D(G(z)): 0.1312 / 0.1309
+[4/5][100/1583] Loss_D: 0.6655  Loss_G: 3.5365  D(x): 0.8178    D(G(z)): 0.3262 / 0.0394
+……
+[4/5][900/1583] Loss_D: 0.5456  Loss_G: 1.7923  D(x): 0.7489    D(G(z)): 0.1972 / 0.2038
+[4/5][950/1583] Loss_D: 0.4718  Loss_G: 2.3825  D(x): 0.7840    D(G(z)): 0.1772 / 0.1172
+[4/5][1000/1583]        Loss_D: 0.5174  Loss_G: 2.5070  D(x): 0.8367    D(G(z)): 0.2556 / 0.1074
+……
+[4/5][1500/1583]        Loss_D: 1.7211  Loss_G: 0.7875  D(x): 0.2588    D(G(z)): 0.0389 / 0.5159
+[4/5][1550/1583]        Loss_D: 0.5871  Loss_G: 2.1340  D(x): 0.7332    D(G(z)): 0.1982 / 0.1518
